@@ -363,7 +363,7 @@ CustomParamWidget = (
 )
 
 
-def _create_param_widget(param: CustomParam, parent: "WorkflowParamsWidget") -> CustomParamWidget:
+def _create_param_widget(param: CustomParam, parent: QWidget) -> CustomParamWidget:
     match param.kind:
         case ParamKind.image_layer:
             return LayerSelect("image", parent)
@@ -378,9 +378,7 @@ def _create_param_widget(param: CustomParam, parent: "WorkflowParamsWidget") -> 
         case ParamKind.text:
             return TextParamWidget(param, parent)
         case ParamKind.prompt_positive | ParamKind.prompt_negative:
-            w = PromptParamWidget(param, parent)
-            w.activated.connect(parent.activated)
-            return w
+            return PromptParamWidget(param, parent)
         case ParamKind.choice:
             return ChoiceParamWidget(param, parent)
         case ParamKind.style:
@@ -429,7 +427,6 @@ class GroupHeader(QWidget):
 
 class WorkflowParamsWidget(QWidget):
     value_changed = pyqtSignal()
-    activated = pyqtSignal()
 
     def __init__(self, params: list[CustomParam], parent: QWidget | None = None):
         super().__init__(parent)
@@ -861,7 +858,6 @@ class CustomWorkflowWidget(QWidget):
             self._params_widget.value = self.model.custom.params  # set default values from model
             self.model.custom.params = self._params_widget.value  # set default values from widgets
             self._params_widget.value_changed.connect(self._change_params)
-            self._params_widget.activated.connect(self._generate)
 
             self._params_scroll.setWidget(self._params_widget)
             params_size = min(self.height() // 2, self._params_widget.min_size)

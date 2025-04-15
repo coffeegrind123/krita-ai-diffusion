@@ -12,8 +12,6 @@ def generate():
             model.generate_live()
         elif model.workspace is Workspace.animation:
             model.animation.generate()
-        elif model.workspace is Workspace.custom:
-            model.custom.generate()
 
 
 def cancel_active():
