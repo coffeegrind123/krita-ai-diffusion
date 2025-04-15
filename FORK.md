@@ -50,6 +50,7 @@
 
 2. **Install this fork**
    - Extract release zip to `%appdata%\krita`
+   - Open and close Krita once
 
 3. **Setup as above**
    - Follow steps 4-5 from Arch Linux section
