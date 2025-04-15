@@ -26,7 +26,7 @@
 3. **Install main plugin**
    - Run Krita
    - Go to: Tools → Scripts → Import plugin from web
-   - Enter: `https://github.com/Acly/krita-ai-diffusion/download/v1.33.0/krita_ai_diffusion-1.33.0.zip`
+   - Enter: `https://github.com/Acly/krita-ai-diffusion/releases/download/v1.33.0/krita_ai_diffusion-1.33.0.zip`
    - Click Yes and close Krita
 
 4. **Install this fork**
@@ -45,7 +45,7 @@
 1. **Install main plugin**
    - Open Krita
    - Go to: Tools → Scripts → Import Plugin from Web
-   - Enter: `https://github.com/Acly/krita-ai-diffusion/download/v1.33.0/krita_ai_diffusion-1.33.0.zip`
+   - Enter: `https://github.com/Acly/krita-ai-diffusion/releases/download/v1.33.0/krita_ai_diffusion-1.33.0.zip`
    - Click Yes and close Krita
 
 2. **Install this fork**
