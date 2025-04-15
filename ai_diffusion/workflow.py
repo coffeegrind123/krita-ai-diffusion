@@ -153,7 +153,19 @@ def load_checkpoint_with_lora(w: ComfyWorkflow, checkpoint: CheckpointInput, mod
     if arch.supports_attention_guidance and checkpoint.self_attention_guidance:
         model = w.apply_self_attention_guidance(model)
 
-    return model, clip, vae
+    return model, Clip(clip, arch), vae
+
+
+def vae_encode(w: ComfyWorkflow, vae: Output, image: Output, tiled: bool):
+    if tiled:
+        return w.vae_encode_tiled(vae, image)
+    return w.vae_encode(vae, image)
+
+
+def vae_decode(w: ComfyWorkflow, vae: Output, latent: Output, tiled: bool):
+    if tiled:
+        return w.vae_decode_tiled(vae, latent)
+    return w.vae_decode(vae, latent)
 
 
 class ImageReshape(NamedTuple):
@@ -249,25 +261,32 @@ class Control:
         return Control(i.mode, ImageOutput(i.image), None, i.strength, i.range)
 
 
+class Clip(NamedTuple):
+    model: Output
+    arch: Arch
+
+
 class TextPrompt:
     text: str
     language: str
     # Cached values to avoid re-encoding the same text for multiple regions and passes
     _output: Output | None = None
-    _clip: Output | None = None  # can be different due to Lora hooks
+    _clip: Clip | None = None  # can be different due to Lora hooks
 
     def __init__(self, text: str, language: str):
         self.text = text
         self.language = language
 
-    def encode(self, w: ComfyWorkflow, clip: Output, style_prompt: str | None = None):
+    def encode(self, w: ComfyWorkflow, clip: Clip, style_prompt: str | None = None):
         text = self.text
         if text != "" and style_prompt:
             text = merge_prompt(text, style_prompt, self.language)
         if self._output is None or self._clip != clip:
             if text and self.language:
                 text = w.translate(text)
-            self._output = w.clip_text_encode(clip, text)
+            self._output = w.clip_text_encode(clip.model, text)
+            if text == "" and clip.arch is not Arch.sd15:
+                self._output = w.conditioning_zero_out(self._output)
             self._clip = clip
         return self._output
 
@@ -280,7 +299,7 @@ class Region:
     control: list[Control] = field(default_factory=list)
     loras: list[LoraInput] = field(default_factory=list)
     is_background: bool = False
-    clip: Output | None = None
+    clip: Clip | None = None
 
     @staticmethod
     def from_input(i: RegionInput, index: int, language: str):
@@ -295,15 +314,15 @@ class Region:
             is_background=index == 0,
         )
 
-    def patch_clip(self, w: ComfyWorkflow, clip: Output):
+    def patch_clip(self, w: ComfyWorkflow, clip: Clip):
         if self.clip is None:
             self.clip = clip
             if len(self.loras) > 0:
                 hooks = w.create_hook_lora([(lora.name, lora.strength) for lora in self.loras])
-                self.clip = w.set_clip_hooks(clip, hooks)
+                self.clip = Clip(w.set_clip_hooks(clip.model, hooks), clip.arch)
         return self.clip
 
-    def encode_prompt(self, w: ComfyWorkflow, clip: Output, style_prompt: str | None = None):
+    def encode_prompt(self, w: ComfyWorkflow, clip: Clip, style_prompt: str | None = None):
         return self.positive.encode(w, self.patch_clip(w, clip), style_prompt)
 
     def copy(self):
@@ -378,7 +397,7 @@ def downscale_all_control_images(cond: ConditioningInput, original: Extent, targ
 def encode_text_prompt(
     w: ComfyWorkflow,
     cond: Conditioning,
-    clip: Output,
+    clip: Clip,
     regions: Output | None,
 ):
     if len(cond.regions) <= 1 or all(len(r.loras) == 0 for r in cond.regions):
@@ -407,7 +426,7 @@ def apply_attention_mask(
     w: ComfyWorkflow,
     model: Output,
     cond: Conditioning,
-    clip: Output,
+    clip: Clip,
     shape: Extent | ImageReshape = no_reshape,
 ):
     if len(cond.regions) == 0:
@@ -448,12 +467,13 @@ def apply_control(
 ):
     models = models.control
     control_lora: ControlMode | None = None
+    is_illu = models.arch in [Arch.illu, Arch.illu_v]
 
     for control in (c for c in control_layers if c.mode.is_control_net):
         image = control.image.load(w, shape)
-        if control.mode is ControlMode.inpaint and models.arch is Arch.sd15:
+        if control.mode is ControlMode.inpaint and (models.arch is Arch.sd15 or is_illu):
             assert control.mask is not None, "Inpaint control requires a mask"
-            image = w.inpaint_preprocessor(image, control.mask.load(w))
+            image = w.inpaint_preprocessor(image, control.mask.load(w), fill_black=is_illu)
         if control.mode.is_lines:  # ControlNet expects white lines on black background
             image = w.invert_image(image)
 
@@ -637,9 +657,10 @@ def scale_refine_and_decode(
     sampling: SamplingInput,
     latent: Output,
     model: Output,
-    clip: Output,
+    clip: Clip,
     vae: Output,
     models: ModelDict,
+    tiled_vae: bool,
 ):
     """Handles scaling images from `initial` to `desired` resolution.
     If it is a substantial upscale, runs a high-res SD refinement pass.
@@ -647,7 +668,7 @@ def scale_refine_and_decode(
 
     mode = extent.refinement_scaling
     if mode in [ScaleMode.none, ScaleMode.resize, ScaleMode.upscale_fast]:
-        decoded = w.vae_decode(vae, latent)
+        decoded = vae_decode(w, vae, latent, tiled_vae)
         return scale(extent.initial, extent.desired, mode, w, decoded, models)
 
     model, regions = apply_attention_mask(w, model, cond, clip, extent.desired)
@@ -660,10 +681,10 @@ def scale_refine_and_decode(
         upscaler = models.upscale[UpscalerName.default]
 
     upscale_model = w.load_upscale_model(upscaler)
-    decoded = w.vae_decode(vae, latent)
+    decoded = vae_decode(w, vae, latent, tiled_vae)
     upscale = w.upscale_image(upscale_model, decoded)
     upscale = w.scale_image(upscale, extent.desired)
-    latent = w.vae_encode(vae, upscale)
+    latent = vae_encode(w, vae, upscale, tiled_vae)
     params = _sampler_params(sampling, strength=0.4)
 
     positive, negative = encode_text_prompt(w, cond, clip, regions)
@@ -671,7 +692,7 @@ def scale_refine_and_decode(
         w, model, positive, negative, cond.all_control, extent.desired, vae, models
     )
     result = w.sampler_custom_advanced(model, positive, negative, latent, models.arch, **params)
-    image = w.vae_decode(vae, result)
+    image = vae_decode(w, vae, result, tiled_vae)
     return image
 
 
@@ -710,7 +731,7 @@ def generate(
         model, positive, negative, latent, models.arch, **_sampler_params(sampling)
     )
     out_image = scale_refine_and_decode(
-        extent, w, cond, sampling, out_latent, model_orig, clip, vae, models
+        extent, w, cond, sampling, out_latent, model_orig, clip, vae, models, checkpoint.tiled_vae
     )
     out_image = w.nsfw_filter(out_image, sensitivity=misc.nsfw_filter)
     out_image = scale_to_target(extent, w, out_image, models)
@@ -758,7 +779,7 @@ def detect_inpaint(
             and prompt != ""
             and not any(c.mode.is_structural for c in control)
         )
-    elif sd_ver is Arch.sdxl:
+    elif sd_ver.is_sdxl_like:
         result.use_inpaint_model = strength > 0.8
     elif sd_ver is Arch.flux:
         result.use_inpaint_model = strength == 1.0
@@ -859,7 +880,7 @@ def inpaint(
         )
         inpaint_model = model
     else:
-        latent = w.vae_encode(vae, in_image)
+        latent = vae_encode(w, vae, in_image, checkpoint.tiled_vae)
         latent = w.set_latent_noise_mask(latent, initial_mask)
         inpaint_model = model
 
@@ -879,12 +900,12 @@ def inpaint(
             upscale_mask = w.scale_mask(cropped_mask, crop_upscale_extent)
         sampler_params = _sampler_params(sampling, strength=0.4)
         upscale_model = w.load_upscale_model(upscaler)
-        upscale = w.vae_decode(vae, out_latent)
+        upscale = vae_decode(w, vae, out_latent, checkpoint.tiled_vae)
         upscale = w.crop_image(upscale, initial_bounds)
         upscale = ensure_minimum_extent(w, upscale, initial_bounds.extent, 32)
         upscale = w.upscale_image(upscale_model, upscale)
         upscale = w.scale_image(upscale, upscale_extent.desired)
-        latent = w.vae_encode(vae, upscale)
+        latent = vae_encode(w, vae, upscale, checkpoint.tiled_vae)
         latent = w.set_latent_noise_mask(latent, upscale_mask)
 
         cond_upscale = cond.copy()
@@ -903,7 +924,7 @@ def inpaint(
         out_latent = w.sampler_custom_advanced(
             model, positive_up, negative_up, latent, models.arch, **sampler_params
         )
-        out_image = w.vae_decode(vae, out_latent)
+        out_image = vae_decode(w, vae, out_latent, checkpoint.tiled_vae)
         out_image = scale_to_target(upscale_extent, w, out_image, models)
     else:
         desired_bounds = extent.convert(target_bounds, "target", "desired")
@@ -911,7 +932,7 @@ def inpaint(
         cropped_extent = ScaledExtent(
             desired_extent, desired_extent, desired_extent, target_bounds.extent
         )
-        out_image = w.vae_decode(vae, out_latent)
+        out_image = vae_decode(w, vae, out_latent, checkpoint.tiled_vae)
         out_image = scale(
             extent.initial, extent.desired, extent.refinement_scaling, w, out_image, models
         )
@@ -941,7 +962,7 @@ def refine(
     model = apply_regional_ip_adapter(w, model, cond.regions, extent.initial, models)
     in_image = w.load_image(image)
     in_image = scale_to_initial(extent, w, in_image, models)
-    latent = w.vae_encode(vae, in_image)
+    latent = vae_encode(w, vae, in_image, checkpoint.tiled_vae)
     latent = w.batch_latent(latent, misc.batch_count)
     positive, negative = encode_text_prompt(w, cond, clip, regions)
     model, positive, negative = apply_control(
@@ -950,7 +971,7 @@ def refine(
     sampler = w.sampler_custom_advanced(
         model, positive, negative, latent, models.arch, **_sampler_params(sampling)
     )
-    out_image = w.vae_decode(vae, sampler)
+    out_image = vae_decode(w, vae, sampler, checkpoint.tiled_vae)
     out_image = w.nsfw_filter(out_image, sensitivity=misc.nsfw_filter)
     out_image = scale_to_target(extent, w, out_image, models)
     w.send_image(out_image)
@@ -995,7 +1016,7 @@ def refine_region(
         inpaint_patch = w.load_fooocus_inpaint(**models.fooocus_inpaint)
         inpaint_model = w.apply_fooocus_inpaint(model, inpaint_patch, latent_inpaint)
     else:
-        latent = w.vae_encode(vae, in_image)
+        latent = vae_encode(w, vae, in_image, checkpoint.tiled_vae)
         latent = w.set_latent_noise_mask(latent, initial_mask)
         inpaint_model = model
 
@@ -1004,7 +1025,7 @@ def refine_region(
         inpaint_model, positive, negative, latent, models.arch, **_sampler_params(sampling)
     )
     out_image = scale_refine_and_decode(
-        extent, w, cond, sampling, out_latent, model_orig, clip, vae, models
+        extent, w, cond, sampling, out_latent, model_orig, clip, vae, models, checkpoint.tiled_vae
     )
     out_image = w.nsfw_filter(out_image, sensitivity=misc.nsfw_filter)
     out_image = scale_to_target(extent, w, out_image, models)
@@ -1164,12 +1185,12 @@ def upscale_tiled(
             w, tile_model, positive, negative, control, no_reshape, vae, models
         )
 
-        latent = w.vae_encode(vae, tile_image)
+        latent = vae_encode(w, vae, tile_image, checkpoint.tiled_vae)
         latent = w.set_latent_noise_mask(latent, tile_mask)
         sampler = w.sampler_custom_advanced(
             tile_model, positive, negative, latent, models.arch, **_sampler_params(sampling)
         )
-        tile_result = w.vae_decode(vae, sampler)
+        tile_result = vae_decode(w, vae, sampler, checkpoint.tiled_vae)
         out_image = w.merge_image_tile(out_image, tile_layout, i, tile_result)
 
     out_image = w.nsfw_filter(out_image, sensitivity=misc.nsfw_filter)
@@ -1221,7 +1242,9 @@ def expand_custom(
             case "ETN_Parameter":
                 outputs[node.output(0)] = get_param(node)
             case "ETN_KritaImageLayer":
-                outputs[node.output(0)] = w.load_image(get_param(node, (Image, ImageCollection)))
+                img, mask = w.load_image_and_mask(get_param(node, (Image, ImageCollection)))
+                outputs[node.output(0)] = img
+                outputs[node.output(1)] = mask
             case "ETN_KritaMaskLayer":
                 outputs[node.output(0)] = w.load_mask(get_param(node, (Image, ImageCollection)))
             case "ETN_KritaStyle":
@@ -1231,7 +1254,7 @@ def expand_custom(
                 sampling = _sampling_from_style(style, 1.0, is_live)
                 model, clip, vae = load_checkpoint_with_lora(w, checkpoint_input, models)
                 outputs[node.output(0)] = model
-                outputs[node.output(1)] = clip
+                outputs[node.output(1)] = clip.model
                 outputs[node.output(2)] = vae
                 outputs[node.output(3)] = style.style_prompt
                 outputs[node.output(4)] = style.negative_prompt
@@ -1286,6 +1309,7 @@ def prepare(
     i.conditioning.positive += _collect_lora_triggers(i.models.loras, files)
     i.models.loras = unique(i.models.loras + extra_loras, key=lambda l: l.name)
     i.models.dynamic_caching = perf.dynamic_caching
+    i.models.tiled_vae = perf.tiled_vae
     arch = i.models.version = resolve_arch(style, models)
 
     _check_server_has_models(i.models, i.conditioning.regions, models, files, style.name)

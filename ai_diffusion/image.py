@@ -142,7 +142,7 @@ class Bounds(NamedTuple):
 
     @property
     def is_zero(self):
-        return self.width == 0 and self.height == 0
+        return self.width * self.height == 0
 
     def is_within(self, x: int, y: int):
         return x >= 0 and x < self.width and y >= 0 and y < self.height
@@ -202,8 +202,8 @@ class Bounds(NamedTuple):
         """Restrict bounds to be inside another bounds."""
         x = max(within.x, bounds.x)
         y = max(within.y, bounds.y)
-        width = min(within.x + within.width, bounds.x + bounds.width) - x
-        height = min(within.y + within.height, bounds.y + bounds.height) - y
+        width = max(0, min(within.x + within.width, bounds.x + bounds.width) - x)
+        height = max(0, min(within.y + within.height, bounds.y + bounds.height) - y)
         return Bounds(x, y, width, height)
 
     @staticmethod
@@ -322,6 +322,14 @@ class Image:
         if fill is not None:
             img._qimage.fill(fill)
         return img
+
+    @staticmethod
+    def from_packed_bytes(data: QByteArray, extent: Extent, channels=4):
+        assert channels == 4 or channels == 1
+        stride = extent.width * channels
+        format = QImage.Format.Format_ARGB32 if channels == 4 else QImage.Format.Format_Grayscale8
+        qimg = QImage(data, extent.width, extent.height, stride, format)
+        return Image(qimg)
 
     @staticmethod
     def copy(image: "Image"):
@@ -693,13 +701,7 @@ class Mask:
             self.image: QImage = data
         else:
             assert len(data) == bounds.width * bounds.height
-            self.image = QImage(
-                data.data(),
-                bounds.width,
-                bounds.height,
-                bounds.width,
-                QImage.Format.Format_Grayscale8,
-            )
+            self.image = Image.from_packed_bytes(data, bounds.extent, channels=1)._qimage
             assert not self.image.isNull()
 
     @staticmethod

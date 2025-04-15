@@ -3,7 +3,7 @@ from collections import deque
 from dataclasses import dataclass, fields, field
 from datetime import datetime
 from enum import Enum, Flag
-from typing import Any, Deque, NamedTuple, TYPE_CHECKING
+from typing import Any, NamedTuple, TYPE_CHECKING
 from PyQt5.QtCore import QObject, pyqtSignal
 
 from .image import Bounds, ImageCollection
@@ -105,7 +105,7 @@ class Job:
     control: "control.ControlLayer | None" = None
     timestamp: datetime
     results: ImageCollection
-    _in_use: dict[int, bool]
+    in_use: dict[int, bool]
 
     def __init__(self, id: str | None, kind: JobKind, params: JobParams):
         self.id = id
@@ -113,10 +113,10 @@ class Job:
         self.params = params
         self.timestamp = datetime.now()
         self.results = ImageCollection()
-        self._in_use = {}
+        self.in_use = {}
 
     def result_was_used(self, index: int):
-        return self._in_use.get(index, False)
+        return self.in_use.get(index, False)
 
 
 class JobQueue(QObject):
@@ -133,14 +133,12 @@ class JobQueue(QObject):
     result_used = pyqtSignal(Item)
     result_discarded = pyqtSignal(Item)
 
-    _entries: Deque[Job]
-    _selection: Item | None = None
-    _previous_selection: Item | None = None
-    _memory_usage = 0  # in MB
-
     def __init__(self):
         super().__init__()
-        self._entries = deque()
+        self._entries: deque[Job] = deque()
+        self._selection: list[JobQueue.Item] = []
+        self._previous_selection: JobQueue.Item | None = None
+        self._memory_usage = 0  # in MB
 
     def add(self, kind: JobKind, params: JobParams):
         return self.add_job(Job(None, kind, params))
@@ -198,18 +196,18 @@ class JobQueue(QObject):
 
     def notify_used(self, job_id: str, index: int):
         job = ensure(self.find(job_id))
-        job._in_use[index] = True
+        job.in_use[index] = True
         self.result_used.emit(self.Item(job_id, index))
 
     def select(self, job_id: str, index: int):
-        self.selection = self.Item(job_id, index)
+        self.selection = [self.Item(job_id, index)]
 
     def toggle_selection(self):
-        if self._selection is not None:
-            self._previous_selection = self._selection
-            self.selection = None
+        if self._selection:
+            self._previous_selection = self._selection[0]
+            self.selection = []
         elif self._previous_selection is not None and self.has_item(self._previous_selection):
-            self.selection = self._previous_selection
+            self.selection = [self._previous_selection]
 
     def _discard_job(self, job: Job):
         self._entries.remove(job)
@@ -226,7 +224,7 @@ class JobQueue(QObject):
             self._discard_job(job)
             return
         for i in range(index, len(job.results) - 1):
-            job._in_use[i] = job._in_use.get(i + 1, False)
+            job.in_use[i] = job.in_use.get(i + 1, False)
         img = job.results.remove(index)
         self._memory_usage -= img.size / (1024**2)
         self.result_discarded.emit(self.Item(job_id, index))
@@ -257,7 +255,7 @@ class JobQueue(QObject):
         return self._selection
 
     @selection.setter
-    def selection(self, value: Item | None):
+    def selection(self, value: list[Item]):
         if self._selection != value:
             self._selection = value
             self.selection_changed.emit()

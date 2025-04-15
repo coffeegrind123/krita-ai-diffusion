@@ -185,7 +185,13 @@ class HistoryWidget(QListWidget):
             if isinstance(value, list) and len(value) == 0:
                 continue
             if isinstance(value, list) and isinstance(value[0], dict):
-                value = "\n  ".join((f"{v.get('name')} ({v.get('strength')})" for v in value))
+                value = "\n  ".join(
+                    (
+                        f"{v.get('name')} ({v.get('strength')})"
+                        for v in value
+                        if v.get("enabled", True)
+                    )
+                )
             s = f"{self._job_info_translations.get(key, key)}: {value}"
             if tooltip_header:
                 s = wrap_text(s, 80, subsequent_indent=" ")
@@ -200,17 +206,36 @@ class HistoryWidget(QListWidget):
         self._remove_items(id.job, id.image)
 
     def _remove_items(self, job_id: str, image_index: int = -1):
-        scroll_pos = 0
-        if scrollbar := self.verticalScrollBar():
-            scroll_pos = scrollbar.value()
+        def _job_id(item: QListWidgetItem | None):
+            return item.data(Qt.ItemDataRole.UserRole) if item else None
 
-        self.clear()
-        for job in filter(self.is_finished, self._model.jobs):
-            self.add(job)
-        self.update_selection()
+        item_was_selected = False
+        with theme.SignalBlocker(self):
+            # Remove all the job's items before triggering potential selection changes
+            current = next((i for i in range(self.count()) if _job_id(self.item(i)) == job_id), -1)
+            if current >= 0:
+                item = self.item(current)
+                while item and _job_id(item) == job_id:
+                    _, index = self.item_info(item)
+                    if image_index == index or (index is not None and image_index == -1):
+                        item_was_selected = item_was_selected or item.isSelected()
+                        self.takeItem(current)
+                    else:
+                        if index and index > image_index:
+                            item.setData(Qt.ItemDataRole.UserRole + 1, index - 1)
+                        current += 1
+                    item = self.item(current)
 
-        if scrollbar and scrollbar.maximum() > 0:
-            scrollbar.setValue(scroll_pos)
+        if item_was_selected:
+            self._model.jobs.selection = []
+        else:
+            self.update_apply_button()  # selection may have moved
+
+        for i in range(self.count()):
+            item = self.item(i)
+            next_item = self.item(i + 1)
+            if item and item.text() != "" and next_item and next_item.text() != "":
+                self.takeItem(i)
 
     def update_selection(self):
         with theme.SignalBlocker(self):
@@ -220,8 +245,7 @@ class HistoryWidget(QListWidget):
                     cast(AnimatedListItem, item).stop_animation()
             self.clearSelection()
 
-            selection = self._model.jobs.selection
-            if selection is not None:
+            for selection in self._model.jobs.selection:
                 item = self._find(selection)
                 if item is not None and not item.isSelected():
                     item.setSelected(True)
@@ -264,11 +288,7 @@ class HistoryWidget(QListWidget):
             item.setIcon(self._image_thumbnail(job, id.image))
 
     def select_item(self):
-        items = self.selectedItems()
-        if len(items) > 0:
-            self._model.jobs.selection = self._item_data(items[0])
-        else:
-            self._model.jobs.selection = None
+        self._model.jobs.selection = [self._item_data(i) for i in self.selectedItems()]
 
     def _toggle_selection(self):
         self._model.jobs.toggle_selection()
@@ -380,6 +400,9 @@ class HistoryWidget(QListWidget):
             if isinstance(active, RootRegion):
                 active.negative = job.params.metadata.get("negative_prompt", "")
 
+            if clipboard := QGuiApplication.clipboard():
+                clipboard.setText(job.params.prompt)
+
             if self._model.workspace is Workspace.custom and self._model.document.is_active:
                 self._model.custom.try_set_params(job.params.metadata)
 
@@ -409,8 +432,8 @@ class HistoryWidget(QListWidget):
 
     def _discard_image(self):
         items = self.selectedItems()
-        item_info = [self.item_info(item) for item in items]  # items are destroyed while iterating
-        for job_id, image_index in item_info:
+        for item in items:
+            job_id, image_index = self.item_info(item)
             self._model.jobs.discard(job_id, image_index)
 
     def _clear_all(self):

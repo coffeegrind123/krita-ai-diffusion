@@ -14,7 +14,7 @@ from ..custom_workflow import CustomParam, ParamKind, SortedWorkflows, WorkflowS
 from ..custom_workflow import CustomGenerationMode
 from ..client import TextOutput
 from ..jobs import JobKind
-from ..model import Model, ApplyBehavior
+from ..model import Model
 from ..properties import Binding, Bind, bind, bind_combo
 from ..style import Styles
 from ..root import root
@@ -363,7 +363,7 @@ CustomParamWidget = (
 )
 
 
-def _create_param_widget(param: CustomParam, parent: QWidget) -> CustomParamWidget:
+def _create_param_widget(param: CustomParam, parent: "WorkflowParamsWidget") -> CustomParamWidget:
     match param.kind:
         case ParamKind.image_layer:
             return LayerSelect("image", parent)
@@ -378,7 +378,9 @@ def _create_param_widget(param: CustomParam, parent: QWidget) -> CustomParamWidg
         case ParamKind.text:
             return TextParamWidget(param, parent)
         case ParamKind.prompt_positive | ParamKind.prompt_negative:
-            return PromptParamWidget(param, parent)
+            w = PromptParamWidget(param, parent)
+            w.activated.connect(parent.activated)
+            return w
         case ParamKind.choice:
             return ChoiceParamWidget(param, parent)
         case ParamKind.style:
@@ -427,6 +429,7 @@ class GroupHeader(QWidget):
 
 class WorkflowParamsWidget(QWidget):
     value_changed = pyqtSignal()
+    activated = pyqtSignal()
 
     def __init__(self, params: list[CustomParam], parent: QWidget | None = None):
         super().__init__(parent)
@@ -858,6 +861,7 @@ class CustomWorkflowWidget(QWidget):
             self._params_widget.value = self.model.custom.params  # set default values from model
             self.model.custom.params = self._params_widget.value  # set default values from widgets
             self._params_widget.value_changed.connect(self._change_params)
+            self._params_widget.activated.connect(self._generate)
 
             self._params_scroll.setWidget(self._params_widget)
             params_size = min(self.height() // 2, self._params_widget.min_size)
@@ -884,7 +888,7 @@ class CustomWorkflowWidget(QWidget):
 
     def apply_live_result(self):
         image, params = self.model.custom.live_result
-        self.model.apply_result(image, params, ApplyBehavior.layer)
+        self.model.apply_result(image, params)
         if settings.new_seed_after_apply:
             self.model.generate_seed()
 
